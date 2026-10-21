@@ -1,0 +1,6 @@
+{
+  "$comment": "The Flipt vendor scenarios the provider TCK runs, and where they come from. The build downloads them from the tagged testbed repository, so this repository keeps no copy of them. Bump the tag when the scenarios change, and name a file here when the repository gains one.",
+  "repository": "flipt-io/openfeature-tck",
+  "version": "v0.1.0",
+  "files": ["spec/extensions/flipt-reason.feature"]
+}

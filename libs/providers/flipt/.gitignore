@@ -1,0 +1,3 @@
+# The Flipt vendor scenarios the provider TCK runs. The build fetches them from the tagged
+# testbed repository, so they are generated rather than kept here.
+src/tck/features

@@ -1,5 +1,5 @@
 import fetchMock from 'fetch-mock-jest';
-import { TypeMismatchError } from '@openfeature/server-sdk';
+import { FlagNotFoundError, GeneralError, TypeMismatchError } from '@openfeature/server-sdk';
 import { FliptProvider } from './flipt-provider';
 
 describe('FliptProvider', () => {
@@ -276,6 +276,171 @@ describe('FliptProvider', () => {
       await expect(provider.resolveObjectEvaluation('flag_string', {}, { fizz: 'buzz' })).rejects.toThrow(
         TypeMismatchError,
       );
+    });
+  });
+
+  describe('resolution reasons', () => {
+    /**
+     * Flipt answers MATCH for a boolean flag even when no rule was involved, so the segments it
+     * matched are what tell a targeting match from a static resolution.
+     */
+    it('should report a static reason for a boolean flag no rule matched', async () => {
+      fetchMock.post(
+        booleanEndpoint,
+        {
+          enabled: true,
+          reason: 'MATCH_EVALUATION_REASON',
+          segmentKeys: [],
+          flagKey: 'flag_boolean',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveBooleanEvaluation('flag_boolean', false, {});
+      expect(value).toHaveProperty('reason', 'STATIC');
+    });
+
+    it('should report a targeting match for a boolean flag a rule matched', async () => {
+      fetchMock.post(
+        booleanEndpoint,
+        {
+          enabled: true,
+          reason: 'MATCH_EVALUATION_REASON',
+          segmentKeys: ['segment1'],
+          flagKey: 'flag_boolean',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveBooleanEvaluation('flag_boolean', false, {});
+      expect(value).toHaveProperty('reason', 'TARGETING_MATCH');
+    });
+
+    it('should report a static reason for a variant flag with no rule', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          match: false,
+          segmentKeys: [],
+          reason: 'DEFAULT_EVALUATION_REASON',
+          variantKey: 'hi',
+          variantAttachment: '',
+          flagKey: 'flag_string',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveStringEvaluation('flag_string', 'default', {});
+      expect(value).toHaveProperty('reason', 'STATIC');
+    });
+
+    it('should report a targeting match for a variant flag a rule matched', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          match: true,
+          segmentKeys: ['segment1'],
+          reason: 'MATCH_EVALUATION_REASON',
+          variantKey: 'hit',
+          variantAttachment: '',
+          flagKey: 'flag_string',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveStringEvaluation('flag_string', 'default', {});
+      expect(value).toHaveProperty('reason', 'TARGETING_MATCH');
+    });
+
+    it('should report the default reason for a flag with no default variant', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          match: false,
+          segmentKeys: [],
+          reason: 'UNKNOWN_EVALUATION_REASON',
+          variantKey: '',
+          variantAttachment: '',
+          flagKey: 'flag_string',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveStringEvaluation('flag_string', 'fallback', {});
+      expect(value).toHaveProperty('value', 'fallback');
+      expect(value).toHaveProperty('reason', 'DEFAULT');
+    });
+
+    it('should report the disabled reason for a disabled flag', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          match: false,
+          segmentKeys: [],
+          reason: 'FLAG_DISABLED_EVALUATION_REASON',
+          variantKey: '',
+          variantAttachment: '',
+          flagKey: 'flag_string',
+        },
+        { overwriteRoutes: true },
+      );
+
+      const value = await provider.resolveStringEvaluation('flag_string', 'fallback', {});
+      expect(value).toHaveProperty('value', 'fallback');
+      expect(value).toHaveProperty('reason', 'DISABLED');
+    });
+  });
+
+  describe('error reporting', () => {
+    it('should report a flag that does not exist as not found', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          status: 404,
+          body: {
+            code: 5,
+            message: 'flag "default/nonExistent" not found',
+            details: [],
+          },
+        },
+        { overwriteRoutes: true },
+      );
+
+      await expect(provider.resolveStringEvaluation('nonExistent', 'default', {})).rejects.toThrow(FlagNotFoundError);
+    });
+
+    it('should report a flag requested as the wrong type as a type mismatch', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          status: 400,
+          body: {
+            code: 3,
+            message: 'flag type BOOLEAN_FLAG_TYPE invalid',
+            details: [],
+          },
+        },
+        { overwriteRoutes: true },
+      );
+
+      await expect(provider.resolveStringEvaluation('flag_string', 'default', {})).rejects.toThrow(TypeMismatchError);
+    });
+
+    it('should report any other failure as a general error', async () => {
+      fetchMock.post(
+        variantEndpoint,
+        {
+          status: 500,
+          body: {
+            code: 13,
+            message: 'internal error',
+            details: [],
+          },
+        },
+        { overwriteRoutes: true },
+      );
+
+      await expect(provider.resolveStringEvaluation('flag_string', 'default', {})).rejects.toThrow(GeneralError);
     });
   });
 });

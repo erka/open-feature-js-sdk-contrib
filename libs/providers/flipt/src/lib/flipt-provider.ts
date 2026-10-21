@@ -12,6 +12,7 @@ import {
   TypeMismatchError,
   ProviderNotReadyError,
   StandardResolutionReasons,
+  FlagNotFoundError,
   GeneralError,
 } from '@openfeature/server-sdk';
 import { transformContext } from './context-transformer';
@@ -98,29 +99,31 @@ export class FliptProvider implements Provider {
       });
 
       switch (booleanEvaluation?.reason) {
-        case 'DEFAULT_EVALUATION_REASON':
-          return {
-            value: booleanEvaluation?.enabled,
-            reason: StandardResolutionReasons.TARGETING_MATCH,
-          };
-        case 'MATCH_EVALUATION_REASON':
-          return {
-            value: booleanEvaluation?.enabled,
-            reason: StandardResolutionReasons.TARGETING_MATCH,
-          };
-        case 'UNKNOWN_EVALUATION_REASON':
+        case 'FLAG_DISABLED_EVALUATION_REASON':
           return {
             value: defaultValue,
-            reason: StandardResolutionReasons.UNKNOWN,
+            reason: StandardResolutionReasons.DISABLED,
           };
-        default:
+        case 'UNKNOWN_EVALUATION_REASON':
+          // Flipt answers UNKNOWN when the flag has no default variant. The caller's default and
+          // the DEFAULT reason, not a type mismatch on an empty key.
           return {
             value: defaultValue,
             reason: StandardResolutionReasons.DEFAULT,
           };
+        case 'MATCH_EVALUATION_REASON':
+          return {
+            value: booleanEvaluation?.enabled,
+            reason: booleanReason(booleanEvaluation),
+          };
+        default:
+          return {
+            value: booleanEvaluation?.enabled,
+            reason: StandardResolutionReasons.STATIC,
+          };
       }
     } catch (e) {
-      throw new GeneralError(getErrorMessage(e));
+      throw toOpenFeatureError(e);
     }
   }
 
@@ -174,7 +177,13 @@ export class FliptProvider implements Provider {
         };
       }
 
-      if (!variantEvaluation.match && variantEvaluation.reason != 'DEFAULT_EVALUATION_REASON') {
+      if (
+        !variantEvaluation.match &&
+        variantEvaluation.reason !== 'MATCH_EVALUATION_REASON' &&
+        variantEvaluation.reason !== 'DEFAULT_EVALUATION_REASON'
+      ) {
+        // Flipt answers UNKNOWN when the flag has no default variant. The caller's default and
+        // the DEFAULT reason, not a type mismatch on an empty key.
         return {
           value: defaultValue,
           reason: StandardResolutionReasons.DEFAULT,
@@ -188,14 +197,17 @@ export class FliptProvider implements Provider {
 
       return {
         value: flagValue,
-        reason: StandardResolutionReasons.TARGETING_MATCH,
+        reason:
+          variantEvaluation.reason === 'MATCH_EVALUATION_REASON'
+            ? StandardResolutionReasons.TARGETING_MATCH
+            : StandardResolutionReasons.STATIC,
       };
     } catch (e) {
       if (e instanceof TypeMismatchError) {
         throw e;
       }
 
-      throw new GeneralError(getErrorMessage(e));
+      throw toOpenFeatureError(e);
     }
   }
 }
@@ -205,6 +217,43 @@ function getErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+/** The shape of a boolean evaluation response, as the client returns it. */
+type BooleanEvaluationResponse = Awaited<ReturnType<FliptClient['evaluation']['boolean']>>;
+
+/**
+ * The reason for a boolean evaluation.
+ *
+ * Flipt answers MATCH for a boolean flag even when no rule was involved, so the segments it
+ * matched are what tell a targeting match from a static resolution. The client's type does not
+ * declare the field the API returns, so it is read from the response as it arrives.
+ */
+function booleanReason(response: BooleanEvaluationResponse): string {
+  const segmentKeys = (response as { segmentKeys?: string[] }).segmentKeys ?? [];
+  return segmentKeys.length > 0 ? StandardResolutionReasons.TARGETING_MATCH : StandardResolutionReasons.STATIC;
+}
+
+/**
+ * Maps a failure from the Flipt client onto the OpenFeature error that describes it.
+ *
+ * The client throws the message the API returned and keeps neither the status nor the error code,
+ * so the message is what there is to map on. Flipt's evaluation errors are stable strings:
+ * `flag "<namespace>/<key>" not found` for a flag that is absent, and
+ * `flag type <type> invalid` for a flag requested as a type it does not have.
+ */
+function toOpenFeatureError(error: unknown): Error {
+  const message = getErrorMessage(error);
+  if (/not found/i.test(message)) {
+    return new FlagNotFoundError(message);
+  }
+  if (/flag type .* invalid/i.test(message)) {
+    return new TypeMismatchError(message);
+  }
+  if (/unavailable/i.test(message)) {
+    return new ProviderNotReadyError(message);
+  }
+  return new GeneralError(message);
 }
 
 type PrimitiveType = string | number;
